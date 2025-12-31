@@ -6,6 +6,7 @@ import (
 	"io/ioutil"
 	"os"
 	"os/exec"
+	"path"
 	"path/filepath"
 	"regexp"
 	"strings"
@@ -140,15 +141,34 @@ func (t *Tester) Enforce() error {
 // ProcessExcludes uses the output from the scanner package and removes blocks
 // from the merged coverage file.
 func (t *Tester) ProcessExcludes(excludes map[string]map[int]bool) error {
+	// Build a map from package path to directory using the data we already have
+	// in Setup.Packages, avoiding expensive calls to patsy.FilePath which spawns
+	// `go list` subprocesses.
+	pkgDirs := make(map[string]string, len(t.setup.Packages))
+	for _, pkg := range t.setup.Packages {
+		pkgDirs[pkg.Path] = pkg.Dir
+	}
+
 	var processed []*cover.Profile
 
 	for _, p := range t.Results {
+		// p.FileName is like "github.com/foo/bar/file.go"
+		// Split into package path "github.com/foo/bar" and filename "file.go"
+		pkgPath, fileName := path.Split(p.FileName)
+		pkgPath = strings.TrimSuffix(pkgPath, "/")
 
-		// Filenames in t.Results are in go package form. We need to convert to
-		// filepaths before use
-		fpath, err := t.setup.Paths.FilePath(p.FileName)
-		if err != nil {
-			return err
+		var fpath string
+		if dir, ok := pkgDirs[pkgPath]; ok {
+			fpath = filepath.Join(dir, fileName)
+		} else {
+			// Fall back to patsy cache for packages not in our pre-built map
+			// This handles cases where the package is not fully-qualified,
+			// or not real, as in the tests for this tool.
+			var pathErr error
+			fpath, pathErr = t.setup.Paths.FilePath(p.FileName)
+			if pathErr != nil {
+				return errors.Wrapf(pathErr, "resolving file path for %s", p.FileName)
+			}
 		}
 
 		f, ok := excludes[fpath]
@@ -157,6 +177,7 @@ func (t *Tester) ProcessExcludes(excludes map[string]map[int]bool) error {
 			processed = append(processed, p)
 			continue
 		}
+
 		var blocks []cover.ProfileBlock
 		for _, b := range p.Blocks {
 			excluded := false
@@ -179,6 +200,7 @@ func (t *Tester) ProcessExcludes(excludes map[string]map[int]bool) error {
 		}
 		processed = append(processed, profile)
 	}
+
 	t.Results = processed
 	return nil
 }
